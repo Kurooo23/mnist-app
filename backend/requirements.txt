@@ -1,0 +1,9 @@
+# pip install -r requirements.txt
+ 
+flask==3.0.3
+flask-cors==4.0.1
+numpy==1.26.4
+ 
+# TensorFlow untuk Windows (GPU otomatis terdeteksi kalau CUDA sudah ada)
+tensorflow==2.16.1
+ 
