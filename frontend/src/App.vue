@@ -117,6 +117,11 @@
         <div class="panel-badge">02</div>
         <h2 class="panel-title">DRAW & PREDICT</h2>
 
+        <!-- ✅ Tip menggambar -->
+        <div class="draw-tip">
+          ✏️ Gambar digit <strong>agak kecil</strong> di tengah kotak
+        </div>
+
         <div class="canvas-wrap">
           <canvas
             ref="drawCanvas"
@@ -130,7 +135,8 @@
             @touchmove.prevent="drawTouch"
             @touchend="stopDraw"
           ></canvas>
-          <div class="canvas-hint">✏️ Draw a digit (0–9) here</div>
+          <!-- ✅ Panduan area gambar -->
+          <div class="canvas-guide-text">Draw a digit (0–9) here</div>
         </div>
 
         <div class="draw-actions">
@@ -143,6 +149,12 @@
         <div class="preview-wrap">
           <div class="preview-label">28 × 28 INPUT PREVIEW</div>
           <canvas ref="previewCanvas" width="84" height="84" class="preview-canvas"></canvas>
+          <!-- ✅ Tampilkan info debug normalisasi -->
+          <div class="preview-stats" v-if="pixelStats">
+            <span>min: {{ pixelStats.min }}</span>
+            <span>max: {{ pixelStats.max }}</span>
+            <span>nonzero: {{ pixelStats.nonzero }}</span>
+          </div>
         </div>
       </section>
 
@@ -211,10 +223,11 @@ export default {
       drawing: false,
       lastX: 0, lastY: 0,
       pollInterval: null,
+      pixelStats: null,   // ✅ untuk debug
       architecture: [
-        { name: 'Conv2D', info: '32 filters · 3×3 · ReLU' },
+        { name: 'Conv2D', info: '32 filters · 3×3 · BN · ReLU' },
         { name: 'MaxPool2D', info: '2×2' },
-        { name: 'Conv2D', info: '64 filters · 3×3 · ReLU' },
+        { name: 'Conv2D', info: '64 filters · 3×3 · BN · ReLU' },
         { name: 'MaxPool2D', info: '2×2' },
         { name: 'Flatten', info: '→ 3136 neurons' },
         { name: 'Dense', info: '128 units · ReLU' },
@@ -275,7 +288,10 @@ export default {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 20;
+      // ✅ FIX: Kurangi line width dari 20 → 14 agar stroke tidak terlalu tebal
+      // Saat di-resize ke 28x28, stroke 20px di canvas 280px = ~2px di 28px (ideal)
+      // tapi jika gambar terlalu besar, stroke jadi blob. 14px lebih aman.
+      ctx.lineWidth = 14;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
@@ -305,15 +321,23 @@ export default {
       ctx.fillRect(0, 0, 280, 280);
       this.updatePreview();
       this.prediction = null;
+      this.pixelStats = null;
     },
     updatePreview() {
       const src = this.$refs.drawCanvas;
       const preview = this.$refs.previewCanvas;
       if (!preview) return;
       const ctx = preview.getContext('2d');
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(src, 0, 0, 28, 28);
-      const imgData = ctx.getImageData(0, 0, 28, 28);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+
+      // ✅ Gambar ke 28x28 dulu lalu scale up ke preview 84x84
+      const temp = document.createElement('canvas');
+      temp.width = 28; temp.height = 28;
+      const tCtx = temp.getContext('2d');
+      tCtx.drawImage(src, 0, 0, 28, 28);
+      const imgData = tCtx.getImageData(0, 0, 28, 28);
+
       ctx.clearRect(0, 0, 84, 84);
       for (let y = 0; y < 28; y++) {
         for (let x = 0; x < 28; x++) {
@@ -324,17 +348,40 @@ export default {
         }
       }
     },
+
+    // ✅ FIX UTAMA: getPixelData yang benar
     getPixelData() {
       const canvas = this.$refs.drawCanvas;
+
+      // Step 1: Resize ke 28x28 dengan anti-aliasing
       const off = document.createElement('canvas');
       off.width = 28; off.height = 28;
       const ctx = off.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, 28, 28);
       ctx.drawImage(canvas, 0, 0, 28, 28);
+
       const imgData = ctx.getImageData(0, 0, 28, 28);
       const pixels = [];
-      for (let i = 0; i < imgData.data.length; i += 4) pixels.push(imgData.data[i] / 255);
+
+      // Step 2: Ambil channel merah (grayscale) → range 0.0 - 1.0
+      // Canvas: hitam=0, putih=255
+      // MNIST:  hitam=0 (background), putih=1 (tinta) → SAMA, tidak perlu invert
+      for (let i = 0; i < imgData.data.length; i += 4) {
+        pixels.push(imgData.data[i] / 255.0);  // ✅ kirim 0.0-1.0
+      }
+
+      // ✅ Update debug stats
+      const nonzero = pixels.filter(p => p > 0.05).length;
+      const max = Math.max(...pixels).toFixed(3);
+      const min = Math.min(...pixels).toFixed(3);
+      this.pixelStats = { min, max, nonzero };
+
       return pixels;
     },
+
     async startTraining() {
       try {
         this.isTraining = true;
@@ -707,7 +754,23 @@ body {
 
 /* ─── DRAW PANEL ─────────────────────────────────── */
 .panel-draw { align-items: center; }
-.canvas-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.canvas-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; position: relative; }
+
+/* ✅ Tip menggambar */
+.draw-tip {
+  width: 100%;
+  max-width: 280px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--yellow);
+  background: rgba(255,214,0,0.08);
+  border: 1px solid rgba(255,214,0,0.25);
+  border-radius: 6px;
+  padding: 6px 10px;
+  letter-spacing: 0.5px;
+}
+.draw-tip strong { font-weight: 700; }
+
 .draw-canvas {
   display: block;
   cursor: crosshair;
@@ -715,7 +778,12 @@ body {
   border: 2px solid var(--green);
   box-shadow: 0 0 30px rgba(0,230,118,0.2), 0 0 0 4px rgba(0,230,118,0.05);
 }
-.canvas-hint { font-size: 11px; font-weight: 600; letter-spacing: 1px; color: var(--muted); }
+.canvas-guide-text {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: var(--muted);
+}
 
 .draw-actions {
   display: flex;
@@ -767,6 +835,16 @@ body {
   image-rendering: pixelated;
   border: 2px solid var(--border);
   border-radius: 6px;
+}
+
+/* ✅ Debug stats di bawah preview */
+.preview-stats {
+  display: flex;
+  gap: 8px;
+  font-size: 9px;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 1px;
 }
 
 /* ─── RESULTS PANEL ──────────────────────────────── */

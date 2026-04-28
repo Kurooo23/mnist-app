@@ -47,12 +47,14 @@ def build_model(device):
         def __init__(self):
             super().__init__()
             self.features = nn.Sequential(
-                nn.Conv2d(1, 32, kernel_size=3, padding=1),  # -> 32x28x28
+                nn.Conv2d(1, 32, kernel_size=3, padding=1),
+                nn.BatchNorm2d(32),   # ✅ tambah BatchNorm untuk stabilitas
                 nn.ReLU(),
-                nn.MaxPool2d(2),                              # -> 32x14x14
-                nn.Conv2d(32, 64, kernel_size=3, padding=1), # -> 64x14x14
+                nn.MaxPool2d(2),
+                nn.Conv2d(32, 64, kernel_size=3, padding=1),
+                nn.BatchNorm2d(64),   # ✅ tambah BatchNorm
                 nn.ReLU(),
-                nn.MaxPool2d(2),                              # -> 64x7x7
+                nn.MaxPool2d(2),
             )
             self.classifier = nn.Sequential(
                 nn.Flatten(),
@@ -126,22 +128,31 @@ def train_thread(epochs, batch_size):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         training_progress["status"] = "loading_data"
 
-        # Load data
-        transform = transforms.Compose([
+        # ✅ Tambah augmentasi agar model lebih robust terhadap variasi tulisan tangan
+        train_transform = transforms.Compose([
+            transforms.RandomRotation(10),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,))
         ])
-        train_dataset = datasets.MNIST('./data', train=True,  download=True, transform=transform)
-        test_dataset  = datasets.MNIST('./data', train=False, download=True, transform=transform)
+        test_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ])
+
+        train_dataset = datasets.MNIST('./data', train=True,  download=True, transform=train_transform)
+        test_dataset  = datasets.MNIST('./data', train=False, download=True, transform=test_transform)
         train_loader  = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,  num_workers=0)
         test_loader   = DataLoader(test_dataset,  batch_size=256,        shuffle=False, num_workers=0)
 
         training_progress["status"] = "training"
 
-        # Build model
         net = build_model(device).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(net.parameters(), lr=0.001)
+
+        # ✅ Learning rate scheduler untuk konvergensi lebih baik
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=max(1, epochs // 3), gamma=0.5)
 
         for epoch in range(epochs):
             # --- TRAIN ---
@@ -161,6 +172,7 @@ def train_thread(epochs, batch_size):
 
             train_loss = total_loss / len(train_loader)
             train_acc  = correct / total
+            scheduler.step()
 
             # --- VALIDATION ---
             net.eval()
@@ -189,7 +201,6 @@ def train_thread(epochs, batch_size):
             })
             print(f"Epoch {epoch+1}/{epochs} — loss: {train_loss:.4f}, acc: {train_acc*100:.1f}%, val_acc: {val_acc*100:.1f}%")
 
-        # Simpan model
         print("💾 Menyimpan model...")
         torch.save(net.state_dict(), MODEL_SAVE_PATH)
         print(f"✅ Model tersimpan di: {MODEL_SAVE_PATH}")
@@ -205,6 +216,39 @@ def train_thread(epochs, batch_size):
         training_progress["status"] = "error"
         training_progress["error"] = str(e)
         is_training = False
+
+# ==============================
+# PREPROCESSING HELPER
+# ==============================
+def preprocess_image(image_data):
+    """
+    Preprocessing yang benar agar cocok dengan format MNIST:
+    1. Bagi 255 (frontend kirim 0-1, tapi pastikan)
+    2. Center digit berdasarkan center of mass
+    3. Normalize dengan mean/std MNIST
+    """
+    from scipy import ndimage
+
+    img = np.array(image_data, dtype=np.float32).reshape(28, 28)
+
+    # ✅ FIX 1: Pastikan range 0-1 (frontend kirim 0-1, tapi jaga-jaga)
+    if img.max() > 1.0:
+        img = img / 255.0
+
+    # ✅ FIX 2: Center digit menggunakan center of mass (seperti preprocessing MNIST asli)
+    # MNIST menggunakan center of mass untuk normalisasi posisi digit
+    total_mass = img.sum()
+    if total_mass > 0:
+        cy, cx = ndimage.center_of_mass(img)
+        shift_y = int(round(14 - cy))
+        shift_x = int(round(14 - cx))
+        if abs(shift_y) > 0 or abs(shift_x) > 0:
+            img = ndimage.shift(img, [shift_y, shift_x], cval=0.0, mode='constant')
+
+    # ✅ FIX 3: Normalize sama persis seperti training
+    img = (img - 0.1307) / 0.3081
+
+    return img.reshape(1, 1, 28, 28)
 
 # ==============================
 # ROUTES
@@ -253,6 +297,7 @@ def predict():
         return jsonify({"error": "Model belum siap. Train atau load model dulu."}), 400
     try:
         import torch
+
         data       = request.get_json()
         image_data = data.get("imageData", [])
         if len(image_data) != 784:
@@ -261,9 +306,8 @@ def predict():
         net    = model["net"]
         device = model["device"]
 
-        # Normalize sama seperti saat training
-        img = np.array(image_data, dtype=np.float32).reshape(1, 1, 28, 28)
-        img = (img - 0.1307) / 0.3081
+        # ✅ Gunakan preprocessing yang sudah diperbaiki
+        img = preprocess_image(image_data)
         tensor = torch.tensor(img).to(device)
 
         net.eval()
@@ -278,6 +322,8 @@ def predict():
             "confidence":    float(probs[pred])
         })
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/model/save", methods=["POST"])
